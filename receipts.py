@@ -16,6 +16,15 @@ class ReceiptStore:
         with self._lock:
             self.rows.append((run_id, state))
 
+    def insert_if_absent(self, run_id, state):
+        """Atomic compare-and-set: check and write under one lock.
+        (In Postgres: UNIQUE (run_id) + INSERT ... ON CONFLICT DO NOTHING.)"""
+        with self._lock:
+            if any(r[0] == run_id for r in self.rows):
+                return False
+            self.rows.append((run_id, state))
+            return True
+
 
 class Run:
     def __init__(self, run_id, store, before_write=None):
@@ -26,8 +35,6 @@ class Run:
 
     def finish(self, state, who):
         """Called by the stage thread ("done") and by the watchdog ("timeout")."""
-        if self.store.has_receipt(self.run_id):
-            return False
         self.before_write(who)
-        self.store.insert(self.run_id, state)
-        return True
+        # Check and write are one atomic step, so only the winner writes.
+        return self.store.insert_if_absent(self.run_id, state)
